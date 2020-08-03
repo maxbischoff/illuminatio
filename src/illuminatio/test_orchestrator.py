@@ -28,13 +28,31 @@ from illuminatio.util import (
 )
 from illuminatio.util import rand_port, add_illuminatio_labels
 
+def auto_detect_cri_socket():
+    api = k8s.client.CoreV1Api()
+    node_list = api.list_node()
+    cri_socket = get_socket_from_kubeadm_annotation(node_list)
+    if not socket
 
-def get_container_runtime():
+    container_runtime = get_container_runtime(node_list)
+    if container_runtime.startswith("docker"):
+        netns_path = "/var/run/docker/netns"
+        if cri_socket is None:
+            cri_socket = "/var/run/docker.sock"
+        runtime = "docker"
+    elif container_runtime.startswith("containerd"):
+        if cri_socket is None:
+            cri_socket = "/run/containerd/containerd.sock"
+        runtime = "containerd"
+    else:
+        raise NotImplementedError(
+            f"Unsupported container runtime: {container_runtime}"
+        )
+
+def get_container_runtime(node_list):
     """
     Fetches and retrieves the name of the container runtime used on kubernetes nodes
     """
-    api = k8s.client.CoreV1Api()
-    node_list = api.list_node()
     if node_list.items:
         container_runtime_name = node_list.items[
             0
@@ -522,7 +540,6 @@ class NetworkTestOrchestrator:
         daemon_set_name: str,
         service_account_name: str,
         config_map_name: str,
-        container_runtime: str,
         cri_socket: str,
     ):
         """
@@ -531,20 +548,6 @@ class NetworkTestOrchestrator:
         """
         runtime = ""
         netns_path = "/var/run/netns"
-
-        if container_runtime.startswith("docker"):
-            netns_path = "/var/run/docker/netns"
-            if cri_socket is None:
-                cri_socket = "/var/run/docker.sock"
-            runtime = "docker"
-        elif container_runtime.startswith("containerd"):
-            if cri_socket is None:
-                cri_socket = "/run/containerd/containerd.sock"
-            runtime = "containerd"
-        else:
-            raise NotImplementedError(
-                f"Unsupported container runtime: {container_runtime}"
-            )
 
         return self.template_manifest(
             "runner-daemonset.yaml",
@@ -584,12 +587,13 @@ class NetworkTestOrchestrator:
                 namespace=PROJECT_NAMESPACE, name=daemonset_name
             )
         except k8s.client.rest.ApiException as api_exception:
+            if cri_socket == None:
+                cri_socket = auto_detect_cri_socket()
             if api_exception.reason == "Not Found":
                 daemonset_manifest = self.create_daemonset_manifest(
                     daemonset_name,
                     service_account_name,
                     config_map_name,
-                    get_container_runtime(),
                     cri_socket,
                 )
                 self.create_daemonset(daemonset_manifest, api)
